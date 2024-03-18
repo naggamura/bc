@@ -4133,15 +4133,15 @@ bc_num_div_by_2(BcNum* a)
 }
 
 /*
- *  1. Calculate 1/sqrt(a) with y = x^(-2) - a
+ *  1. Calculate 1/sqrt(a) from Newton-Raphson approximation of y = x^(-2) - a
  *  2. Calculate sqrt(a) from a*(1/sqrt(a))
  *
  *  Newton-Raphson iteration for y = x^(-2) - a
  *      x <- x*(3-a*x^2)/2
  *
- *  No long division in iteration.
+ *  No long division in the iteration.
  *
- *  Detail description --> bc/sqrt_1.png, bc/sqrt_2.png
+ *  Detail descriptions --> bc/sqrt_1.png, bc/sqrt_2.png
  */
 void
 bc_num_sqrt(BcNum* restrict a, BcNum* restrict b, size_t scale)
