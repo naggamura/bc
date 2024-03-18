@@ -100,6 +100,8 @@ main(int argc, char* argv[])
 
 	BC_SETJMP_LOCKED(vm, exit);
 
+	bi_init(0);
+
 #if !DC_ENABLED
 	s = bc_main(argc, argv);
 #elif !BC_ENABLED
@@ -113,6 +115,8 @@ main(int argc, char* argv[])
 	vm->status = (int) s;
 
 exit:
+	bi_deinit();
+
 	BC_SIG_MAYLOCK;
 
 	return vm->status == BC_STATUS_QUIT ? BC_STATUS_SUCCESS : vm->status;

@@ -1828,8 +1828,10 @@ err:
 static void
 bc_num_d(BcNum* a, BcNum* b, BcNum* restrict c, size_t scale)
 {
-	size_t len, cpardx;
-	BcNum cpa, cpb;
+	BcNum aa = { .num = NULL };
+	BcDig* ta;
+	len_t rdx, ardx, brdx;
+	len_t i, diff, alen, blen, clen;
 #if BC_ENABLE_LIBRARY
 	BcVm* vm = bcl_getspecific();
 #endif // BC_ENABLE_LIBRARY
@@ -1858,72 +1860,76 @@ bc_num_d(BcNum* a, BcNum* b, BcNum* restrict c, size_t scale)
 		return;
 	}
 
-	len = bc_num_divReq(a, b, scale);
+		rdx = BC_NUM_RDX(scale);
+	ardx = BC_NUM_RDX_VAL(a);
+	brdx = BC_NUM_RDX_VAL(b);
+
+	blen = (len_t)b->len;
+	for(i = blen - 1; i >= 0 && !b->num[i]; i--)
+	{
+		;
+	}
+	blen = i+1;
 
 	BC_SIG_LOCK;
 
-	// Initialize copies of the parameters. We want the length of the first
-	// operand copy to be as big as the result because of the way the division
-	// is implemented.
-	bc_num_init(&cpa, len);
-	bc_num_copy(&cpa, a);
-	bc_num_createCopy(&cpb, b);
+	if (ardx < (brdx+rdx))
+	{
+		diff = (brdx+rdx) - ardx;
+		alen = (len_t)a->len + diff;
+		bc_num_init(&aa, (size_t)alen);
+		ta = aa.num;
+		memcpy(ta + diff, a->num, a->len*sizeof(BcDig));
+		memset(ta, 0, (size_t)diff * sizeof(BcDig));
+
+	}
+	else
+	{
+		diff = ardx - (brdx+rdx);
+		ta = a->num + diff;
+		alen = (len_t)a->len - diff;
+		clen = alen - blen + 1;
+	}
 
 	BC_SETJMP_LOCKED(vm, err);
 
 	BC_SIG_UNLOCK;
 
-	len = b->len;
-
-	// Like the above comment, we want the copy of the first parameter to be
-	// larger than the second parameter.
-	if (len > cpa.len)
+	if(alen >= blen)
 	{
-		bc_num_expand(&cpa, bc_vm_growSize(len, 2));
-		bc_num_extend(&cpa, (len - cpa.len) * BC_BASE_DIGS);
+		clen = alen - blen + 1;
+	}
+	else
+	{
+		clen = 1;
+	}
+	if (clen < rdx)
+	{
+		clen = rdx;
 	}
 
-	cpardx = BC_NUM_RDX_VAL_NP(cpa);
-	cpa.scale = cpardx * BC_BASE_DIGS;
+	bc_num_expand(c, (size_t)clen);
 
-	// This is just setting up the scale in preparation for the division.
-	bc_num_extend(&cpa, b->scale);
-	cpardx = BC_NUM_RDX_VAL_NP(cpa) - BC_NUM_RDX(b->scale);
-	BC_NUM_RDX_SET_NP(cpa, cpardx);
-	cpa.scale = cpardx * BC_BASE_DIGS;
-
-	// Once again, just setting things up, this time to match scale.
-	if (scale > cpa.scale)
+	for(i = alen - 1; i >= 0 && !ta[i]; i--)
 	{
-		bc_num_extend(&cpa, scale);
-		cpardx = BC_NUM_RDX_VAL_NP(cpa);
-		cpa.scale = cpardx * BC_BASE_DIGS;
+		;
 	}
-
-	// Grow if necessary.
-	if (cpa.cap == cpa.len) bc_num_expand(&cpa, bc_vm_growSize(cpa.len, 1));
-
-	// We want an extra zero in front to make things simpler.
-	cpa.num[cpa.len++] = 0;
-
-	// Still setting things up. Why all of these things are needed is not
-	// something that can be easily explained, but it has to do with making the
-	// actual algorithm easier to understand because it can assume a lot of
-	// things. Thus, you should view all of this setup code as establishing
-	// assumptions for bc_num_d_long(), where the actual division happens.
-	if (cpardx == cpa.len) cpa.len = bc_num_nonZeroLen(&cpa);
-	if (BC_NUM_RDX_VAL_NP(cpb) == cpb.len) cpb.len = bc_num_nonZeroLen(&cpb);
-	cpb.scale = 0;
-	BC_NUM_RDX_SET_NP(cpb, 0);
-
-	bc_num_d_long(&cpa, &cpb, c, scale);
-
+	alen = i+1;
+	bi_div2(ta, alen, b->num, blen, c->num, &clen, NULL, NULL);
+	if(clen < rdx)
+	{
+		memset(c->num + clen, 0, (size_t)(rdx-clen) * sizeof(BcDig));
+	}
+	c->len = (size_t)clen;
+	BC_NUM_RDX_SET(c, (size_t)rdx);
+	c->scale = (size_t)rdx * BC_BASE_DIGS;
 	bc_num_retireMul(c, scale, BC_NUM_NEG(a), BC_NUM_NEG(b));
-
 err:
 	BC_SIG_MAYLOCK;
-	bc_num_free(&cpb);
-	bc_num_free(&cpa);
+	if (aa.num)
+	{
+		bc_num_free(&aa);
+	}
 	BC_LONGJMP_CONT(vm);
 }
 
@@ -4082,14 +4088,12 @@ bc_num_rshift(BcNum* a, BcNum* b, BcNum* c, size_t scale)
 void
 bc_num_sqrt(BcNum* restrict a, BcNum* restrict b, size_t scale)
 {
-	BcNum num1, num2, half, f, fprime;
-	BcNum* x0;
-	BcNum* x1;
-	BcNum* temp;
+	BcNum aa;
 	// realscale is meant to quiet a warning on GCC about longjmp() clobbering.
 	// This one is real.
-	size_t pow, len, rdx, req, resscale, realscale;
-	BcDig half_digs[1];
+	size_t i, a_shift, a_len, rdx, req, realscale;
+	size_t a_rdx = BC_NUM_RDX_VAL(a), scale_rdx = BC_NUM_RDX(scale);
+
 #if BC_ENABLE_LIBRARY
 	BcVm* vm = bcl_getspecific();
 #endif // BC_ENABLE_LIBRARY
@@ -4100,23 +4104,61 @@ bc_num_sqrt(BcNum* restrict a, BcNum* restrict b, size_t scale)
 
 	// We want to calculate to a's scale if it is bigger so that the result will
 	// truncate properly.
-	if (a->scale > scale) realscale = a->scale;
-	else realscale = scale;
+	if (a->scale > scale)
+	{
+		realscale = a->scale;
+	}
+	else
+	{
+		realscale = scale;
+	}
 
-	// Set parameters for the result.
-	len = bc_vm_growSize(bc_num_intDigits(a), 1);
-	rdx = BC_NUM_RDX(realscale);
+	// Prepare for a * BASE^(2*new_scale)
 
-	// Square root needs half of the length of the parameter.
-	req = bc_vm_growSize(BC_MAX(rdx, BC_NUM_RDX_VAL(a)), len >> 1);
-	req = bc_vm_growSize(req, 1);
+	// Skipping leading zeros.
+	aa = *a;
+	aa.scale = 0;
+	aa.rdx = 0;
+	for (i = aa.len - 1; i < a->len && !aa.num[i]; i--)
+	{
+		;
+	}
+	aa.len = i + 1;
+
+	if (a_rdx >= scale_rdx)
+	{
+		rdx = a_rdx;
+		a_shift = rdx;
+	}
+	else
+	{
+		rdx = scale_rdx;
+		a_shift = rdx - a_rdx;
+		a_shift = bc_vm_growSize(a_shift, rdx);
+	}
+
+	// New rdx == BC_NUM_RDX(resulting scale)
+
+	// Let A = aa * BASE^a_shift
+	a_len = aa.len + a_shift; // length of A
+
+	//rdx = BC_NUM_RDX(realscale);
+
+	req = (a_len + 1) / 2 + 1 + 1;
+	if (req < rdx)
+	{
+		req = rdx;
+	}
 
 	BC_SIG_LOCK;
 
 	// Unlike the binary operators, this function is the only single parameter
 	// function and is expected to initialize the result. This means that it
 	// expects that b is *NOT* preallocated. We allocate it here.
+
 	bc_num_init(b, req);
+
+	BC_SETJMP_LOCKED(vm, err);
 
 	BC_SIG_UNLOCK;
 
@@ -4124,112 +4166,33 @@ bc_num_sqrt(BcNum* restrict a, BcNum* restrict b, size_t scale)
 	assert(a->num != NULL && b->num != NULL);
 
 	// Easy case.
-	if (BC_NUM_ZERO(a))
+	if (!a_len)
 	{
-		bc_num_setToZero(b, realscale);
-		return;
+		b->num[0] = 0;
+		b->len = 0;
+	}
+	else if(a_len == 1 && aa.num[0] == 1)
+	{
+		b->num[0] = 1;
+		b->len = 1;
+	}
+	else
+	{
+		len_t len;
+		bi_sqrt(aa.num, (len_t)aa.len, (len_t)a_shift, b->num, &len);
+		b->len = (size_t)len;
 	}
 
-	// Another easy case.
-	if (BC_NUM_ONE(a))
+	if (b->len < rdx)
 	{
-		bc_num_one(b);
-		bc_num_extend(b, realscale);
-		return;
+		memset(b->num + b->len, 0, (rdx - b->len) * sizeof(BcDig));
+		b->len = rdx;
 	}
-
-	// Set the parameters again.
-	rdx = BC_NUM_RDX(realscale);
-	rdx = BC_MAX(rdx, BC_NUM_RDX_VAL(a));
-	len = bc_vm_growSize(a->len, rdx);
-
-	BC_SIG_LOCK;
-
-	bc_num_init(&num1, len);
-	bc_num_init(&num2, len);
-	bc_num_setup(&half, half_digs, sizeof(half_digs) / sizeof(BcDig));
-
-	// There is a division by two in the formula. We set up a number that's 1/2
-	// so that we can use multiplication instead of heavy division.
-	bc_num_setToZero(&half, 1);
-	half.num[0] = BC_BASE_POW / 2;
-	half.len = 1;
-	BC_NUM_RDX_SET_NP(half, 1);
-
-	bc_num_init(&f, len);
-	bc_num_init(&fprime, len);
-
-	BC_SETJMP_LOCKED(vm, err);
-
-	BC_SIG_UNLOCK;
-
-	// Pointers for easy switching.
-	x0 = &num1;
-	x1 = &num2;
-
-	// Start with 1.
-	bc_num_one(x0);
-
-	// The power of the operand is needed for the estimate.
-	pow = bc_num_intDigits(a);
-
-	// The code in this if statement calculates the initial estimate. First, if
-	// a is less than 1, then 0 is a good estimate. Otherwise, we want something
-	// in the same ballpark. That ballpark is half of pow because the result
-	// will have half the digits.
-	if (pow)
-	{
-		// An odd number is served by starting with 2^((pow-1)/2), and an even
-		// number is served by starting with 6^((pow-2)/2). Why? Because math.
-		if (pow & 1) x0->num[0] = 2;
-		else x0->num[0] = 6;
-
-		pow -= 2 - (pow & 1);
-		bc_num_shiftLeft(x0, pow / 2);
-	}
-
-	// I can set the rdx here directly because neg should be false.
-	x0->scale = x0->rdx = 0;
-	resscale = (realscale + BC_BASE_DIGS) + 2;
-
-	// This is the calculation loop. This compare goes to 0 eventually as the
-	// difference between the two numbers gets smaller than resscale.
-	while (bc_num_cmp(x1, x0))
-	{
-		assert(BC_NUM_NONZERO(x0));
-
-		// This loop directly corresponds to the iteration in Newton's method.
-		// If you know the formula, this loop makes sense. Go study the formula.
-
-		bc_num_div(a, x0, &f, resscale);
-		bc_num_add(x0, &f, &fprime, resscale);
-
-		assert(BC_NUM_RDX_VALID_NP(fprime));
-		assert(BC_NUM_RDX_VALID_NP(half));
-
-		bc_num_mul(&fprime, &half, x1, resscale);
-
-		// Switch.
-		temp = x0;
-		x0 = x1;
-		x1 = temp;
-	}
-
-	// Copy to the result and truncate.
-	bc_num_copy(b, x0);
-	if (b->scale > realscale) bc_num_truncate(b, b->scale - realscale);
-
-	assert(!BC_NUM_NEG(b) || BC_NUM_NONZERO(b));
-	assert(BC_NUM_RDX_VALID(b));
-	assert(BC_NUM_RDX_VAL(b) <= b->len || !b->len);
-	assert(!b->len || b->num[b->len - 1] || BC_NUM_RDX_VAL(b) == b->len);
-
+	BC_NUM_RDX_SET(b, rdx);
+	b->scale = rdx * BC_BASE_DIGS;
+	bc_num_truncate(b, b->scale - realscale);
 err:
 	BC_SIG_MAYLOCK;
-	bc_num_free(&fprime);
-	bc_num_free(&f);
-	bc_num_free(&num2);
-	bc_num_free(&num1);
 	BC_LONGJMP_CONT(vm);
 }
 

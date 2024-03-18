@@ -47,6 +47,8 @@
 #include <vector.h>
 #include <bcl.h>
 
+#include <bi.h>
+
 /// Everything in bc is base 10..
 #define BC_BASE (10)
 
