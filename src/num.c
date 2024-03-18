@@ -4156,7 +4156,6 @@ bc_num_sqrt(BcNum* restrict a, BcNum* restrict b, size_t scale)
 	// This one is real.
 	size_t i, a_shift, a_len, rdx, req, realscale;
 	size_t a_rdx = BC_NUM_RDX_VAL(a), scale_rdx = BC_NUM_RDX(scale);
-	bool exceeded;
 #if BC_ENABLE_LIBRARY
 	BcVm* vm = bcl_getspecific();
 #endif // BC_ENABLE_LIBRARY
@@ -4333,7 +4332,6 @@ bc_num_sqrt(BcNum* restrict a, BcNum* restrict b, size_t scale)
 	bc_num_d_long(&temp, &num2, &num1, 0);
 	bc_num_clean(&num1);
 
-	exceeded = false;
 	while (1)
 	{
 		// x^2
@@ -4389,12 +4387,8 @@ bc_num_sqrt(BcNum* restrict a, BcNum* restrict b, size_t scale)
 		shell.num = temp.num + a_len;
 
 		// To make sure that new estimation <= (1/sqrt(a))*R^L
-		if (exceeded)
-		{
-			exceeded = false;
-			bc_num_subArrays(shell.num, &one, 1);
-			bc_num_clean(&shell);
-		}
+		bc_num_subArrays(shell.num, &one, 1);
+		bc_num_clean(&shell);
 
 		if (shell.len > num1.len)
 		{
@@ -4409,21 +4403,12 @@ bc_num_sqrt(BcNum* restrict a, BcNum* restrict b, size_t scale)
 			cmp = bc_num_compare(shell.num, num1.num, shell.len);
 		}
 
-		if (cmp > 0) // new > previous. Go next.
-		{
-			num1.len = shell.len;
-			memcpy(num1.num, shell.num, num1.len * sizeof(BcDig));
-		}
-		else if (cmp <= 0) // new == previous. break.
+		if (cmp <= 0) // new <== previous. break.
 		{
 			break;
 		}
-		// new < previous. Try again with calibration.
-		// Will break at the next step.
-		else if (cmp < 0)
-		{
-			exceeded = true;
-		}
+		num1.len = shell.len;
+		memcpy(num1.num, shell.num, num1.len * sizeof(BcDig));
 	}
 
 	// b <-- ( x * aa ) / BASE^(a_len - a_shift)
