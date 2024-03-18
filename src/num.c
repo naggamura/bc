@@ -4085,6 +4085,7 @@ bc_num_rshift(BcNum* a, BcNum* b, BcNum* c, size_t scale)
 }
 #endif // BC_ENABLE_EXTRA_MATH
 
+////
 void
 bc_num_sqrt(BcNum* restrict a, BcNum* restrict b, size_t scale)
 {
