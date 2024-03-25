@@ -304,54 +304,6 @@ bc_num_subDigits(BcDig a, BcDig b, bool* carry)
 }
 
 /**
- * Add two BcDig arrays and store the result in the first array.
- * @param a    The first operand and out array.
- * @param b    The second operand.
- * @param len  The length of @a b.
- */
-static void
-bc_num_addArrays(BcDig* restrict a, const BcDig* restrict b, size_t len)
-{
-	size_t i;
-	bool carry = false;
-
-	for (i = 0; i < len; ++i)
-	{
-		a[i] = bc_num_addDigits(a[i], b[i], &carry);
-	}
-
-	// Take care of the extra limbs in the bigger array.
-	for (; carry; ++i)
-	{
-		a[i] = bc_num_addDigits(a[i], 0, &carry);
-	}
-}
-
-/**
- * Subtract two BcDig arrays and store the result in the first array.
- * @param a    The first operand and out array.
- * @param b    The second operand.
- * @param len  The length of @a b.
- */
-static void
-bc_num_subArrays(BcDig* restrict a, const BcDig* restrict b, size_t len)
-{
-	size_t i;
-	bool carry = false;
-
-	for (i = 0; i < len; ++i)
-	{
-		a[i] = bc_num_subDigits(a[i], b[i], &carry);
-	}
-
-	// Take care of the extra limbs in the bigger array.
-	for (; carry; ++i)
-	{
-		a[i] = bc_num_subDigits(a[i], 0, &carry);
-	}
-}
-
-/**
  * Multiply a BcNum array by a one-limb number. This is a faster version of
  * multiplication for when we can use it.
  * @param a  The BcNum to multiply by the one-limb number.
@@ -618,49 +570,6 @@ bc_num_retireMul(BcNum* restrict n, size_t scale, bool neg1, bool neg2)
 
 	// We need to ensure rdx is correct.
 	if (BC_NUM_NONZERO(n)) n->rdx = BC_NUM_NEG_VAL(n, !neg1 != !neg2);
-}
-
-/**
- * Splits a number into two BcNum's. This is used in Karatsuba.
- * @param n    The number to split.
- * @param idx  The index to split at.
- * @param a    An out parameter; the low part of @a n.
- * @param b    An out parameter; the high part of @a n.
- */
-static void
-bc_num_split(const BcNum* restrict n, size_t idx, BcNum* restrict a,
-             BcNum* restrict b)
-{
-	// We want a and b to be clear.
-	assert(BC_NUM_ZERO(a));
-	assert(BC_NUM_ZERO(b));
-
-	// The usual case.
-	if (idx < n->len)
-	{
-		// Set the fields first.
-		b->len = n->len - idx;
-		a->len = idx;
-		a->scale = b->scale = 0;
-		BC_NUM_RDX_SET(a, 0);
-		BC_NUM_RDX_SET(b, 0);
-
-		assert(a->cap >= a->len);
-		assert(b->cap >= b->len);
-
-		// Copy the arrays. This is not necessary for safety, but it is faster,
-		// for some reason.
-		// NOLINTNEXTLINE
-		memcpy(b->num, n->num + idx, BC_NUM_SIZE(b->len));
-		// NOLINTNEXTLINE
-		memcpy(a->num, n->num, BC_NUM_SIZE(idx));
-
-		bc_num_clean(b);
-	}
-	// If the index is weird, just skip the split.
-	else bc_num_copy(a, n);
-
-	bc_num_clean(a);
 }
 
 /**
@@ -1184,239 +1093,45 @@ bc_num_as(BcNum* a, BcNum* b, BcNum* restrict c, size_t sub)
 }
 
 /**
- * The simple multiplication that karatsuba dishes out to when the length of the
- * numbers gets low enough. This doesn't use scale because it treats the
- * operands as though they are integers.
- * @param a  The first operand.
- * @param b  The second operand.
- * @param c  The return parameter.
- */
-static void
-bc_num_m_simp(const BcNum* a, const BcNum* b, BcNum* restrict c)
-{
-	size_t i, alen = a->len, blen = b->len, clen;
-	BcDig* ptr_a = a->num;
-	BcDig* ptr_b = b->num;
-	BcDig* ptr_c;
-	BcBigDig sum = 0, carry = 0;
-
-	assert(sizeof(sum) >= sizeof(BcDig) * 2);
-	assert(!BC_NUM_RDX_VAL(a) && !BC_NUM_RDX_VAL(b));
-
-	// Make sure c is big enough.
-	clen = bc_vm_growSize(alen, blen);
-	bc_num_expand(c, bc_vm_growSize(clen, 1));
-
-	// If we don't memset, then we might have uninitialized data use later.
-	ptr_c = c->num;
-	// NOLINTNEXTLINE
-	memset(ptr_c, 0, BC_NUM_SIZE(c->cap));
-
-	// This is the actual multiplication loop. It uses the lattice form of long
-	// multiplication (see the explanation on the web page at
-	// https://knilt.arcc.albany.edu/What_is_Lattice_Multiplication or the
-	// explanation at Wikipedia).
-	for (i = 0; i < clen; ++i)
-	{
-		ssize_t sidx = (ssize_t) (i - blen + 1);
-		size_t j, k;
-
-		// These are the start indices.
-		j = (size_t) BC_MAX(0, sidx);
-		k = BC_MIN(i, blen - 1);
-
-		// On every iteration of this loop, a multiplication happens, then the
-		// sum is automatically calculated.
-		for (; j < alen && k < blen; ++j, --k)
-		{
-			sum += ((BcBigDig) ptr_a[j]) * ((BcBigDig) ptr_b[k]);
-
-			if (sum >= ((BcBigDig) BC_BASE_POW) * BC_BASE_POW)
-			{
-				carry += sum / BC_BASE_POW;
-				sum %= BC_BASE_POW;
-			}
-		}
-
-		// Calculate the carry.
-		if (sum >= BC_BASE_POW)
-		{
-			carry += sum / BC_BASE_POW;
-			sum %= BC_BASE_POW;
-		}
-
-		// Store and set up for next iteration.
-		ptr_c[i] = (BcDig) sum;
-		assert(ptr_c[i] < BC_BASE_POW);
-		sum = carry;
-		carry = 0;
-	}
-
-	// This should always be true because there should be no carry on the last
-	// digit; multiplication never goes above the sum of both lengths.
-	assert(!sum);
-
-	c->len = clen;
-}
-
-/**
- * Does a shifted add or subtract for Karatsuba below. This calls either
- * bc_num_addArrays() or bc_num_subArrays().
- * @param n      An in/out parameter; the first operand and return parameter.
- * @param a      The second operand.
- * @param shift  The amount to shift @a n by when adding/subtracting.
- * @param op     The function to call, either bc_num_addArrays() or
- *               bc_num_subArrays().
- */
-static void
-bc_num_shiftAddSub(BcNum* restrict n, const BcNum* restrict a, size_t shift,
-                   BcNumShiftAddOp op)
-{
-	assert(n->len >= shift + a->len);
-	assert(!BC_NUM_RDX_VAL(n) && !BC_NUM_RDX_VAL(a));
-	op(n->num + shift, a->num, a->len);
-}
-
-/**
  * Implements the Karatsuba algorithm.
  */
 static void
 bc_num_k(const BcNum* a, const BcNum* b, BcNum* restrict c)
 {
-	size_t max, max2, total;
-	BcNum l1, h1, l2, h2, m2, m1, z0, z1, z2, temp;
-	BcDig* digs;
-	BcDig* dig_ptr;
-	BcNumShiftAddOp op;
-	bool aone = BC_NUM_ONE(a);
-#if BC_ENABLE_LIBRARY
-	BcVm* vm = bcl_getspecific();
-#endif // BC_ENABLE_LIBRARY
+    BcDig *aa = a->num, *bb = b->num;
+    len_t i, alen = (len_t)a->len, blen = (len_t)b->len, clen;
 
-	assert(BC_NUM_ZERO(c));
+    for(i = alen-1; i >= 0 && !aa[i]; i--)
+    {
+        ;
+    }
+    alen = i+1;
+    for(i = blen-1; i >= 0 && !bb[i]; i--)
+    {
+        ;
+    }
+    blen = i+1;
+ 
+    BC_SIG_LOCK;
 
-	if (BC_NUM_ZERO(a) || BC_NUM_ZERO(b)) return;
+    BC_SETJMP_LOCKED(vm, err);
 
-	if (aone || BC_NUM_ONE(b))
-	{
-		bc_num_copy(c, aone ? b : a);
-		if ((aone && BC_NUM_NEG(a)) || BC_NUM_NEG(b)) BC_NUM_NEG_TGL(c);
-		return;
-	}
+    BC_SIG_UNLOCK;
 
-	// Shell out to the simple algorithm with certain conditions.
-	if (a->len < BC_NUM_KARATSUBA_LEN || b->len < BC_NUM_KARATSUBA_LEN)
-	{
-		bc_num_m_simp(a, b, c);
-		return;
-	}
+    {
+        size_t new_clen;
 
-	// We need to calculate the max size of the numbers that can result from the
-	// operations.
-	max = BC_MAX(a->len, b->len);
-	max = BC_MAX(max, BC_NUM_DEF_SIZE);
-	max2 = (max + 1) / 2;
-
-	// Calculate the space needed for all of the temporary allocations. We do
-	// this to just allocate once.
-	total = bc_vm_arraySize(BC_NUM_KARATSUBA_ALLOCS, max);
-
-	BC_SIG_LOCK;
-
-	// Allocate space for all of the temporaries.
-	digs = dig_ptr = bc_vm_malloc(BC_NUM_SIZE(total));
-
-	// Set up the temporaries.
-	bc_num_setup(&l1, dig_ptr, max);
-	dig_ptr += max;
-	bc_num_setup(&h1, dig_ptr, max);
-	dig_ptr += max;
-	bc_num_setup(&l2, dig_ptr, max);
-	dig_ptr += max;
-	bc_num_setup(&h2, dig_ptr, max);
-	dig_ptr += max;
-	bc_num_setup(&m1, dig_ptr, max);
-	dig_ptr += max;
-	bc_num_setup(&m2, dig_ptr, max);
-
-	// Some temporaries need the ability to grow, so we allocate them
-	// separately.
-	max = bc_vm_growSize(max, 1);
-	bc_num_init(&z0, max);
-	bc_num_init(&z1, max);
-	bc_num_init(&z2, max);
-	max = bc_vm_growSize(max, max) + 1;
-	bc_num_init(&temp, max);
-
-	BC_SETJMP_LOCKED(vm, err);
-
-	BC_SIG_UNLOCK;
-
-	// First, set up c.
-	bc_num_expand(c, max);
-	c->len = max;
-	// NOLINTNEXTLINE
-	memset(c->num, 0, BC_NUM_SIZE(c->len));
-
-	// Split the parameters.
-	bc_num_split(a, max2, &l1, &h1);
-	bc_num_split(b, max2, &l2, &h2);
-
-	// Do the subtraction.
-	bc_num_sub(&h1, &l1, &m1, 0);
-	bc_num_sub(&l2, &h2, &m2, 0);
-
-	// The if statements below are there for efficiency reasons. The best way to
-	// understand them is to understand the Karatsuba algorithm because now that
-	// the ollocations and splits are done, the algorithm is pretty
-	// straightforward.
-
-	if (BC_NUM_NONZERO(&h1) && BC_NUM_NONZERO(&h2))
-	{
-		assert(BC_NUM_RDX_VALID_NP(h1));
-		assert(BC_NUM_RDX_VALID_NP(h2));
-
-		bc_num_m(&h1, &h2, &z2, 0);
-		bc_num_clean(&z2);
-
-		bc_num_shiftAddSub(c, &z2, max2 * 2, bc_num_addArrays);
-		bc_num_shiftAddSub(c, &z2, max2, bc_num_addArrays);
-	}
-
-	if (BC_NUM_NONZERO(&l1) && BC_NUM_NONZERO(&l2))
-	{
-		assert(BC_NUM_RDX_VALID_NP(l1));
-		assert(BC_NUM_RDX_VALID_NP(l2));
-
-		bc_num_m(&l1, &l2, &z0, 0);
-		bc_num_clean(&z0);
-
-		bc_num_shiftAddSub(c, &z0, max2, bc_num_addArrays);
-		bc_num_shiftAddSub(c, &z0, 0, bc_num_addArrays);
-	}
-
-	if (BC_NUM_NONZERO(&m1) && BC_NUM_NONZERO(&m2))
-	{
-		assert(BC_NUM_RDX_VALID_NP(m1));
-		assert(BC_NUM_RDX_VALID_NP(m1));
-
-		bc_num_m(&m1, &m2, &z1, 0);
-		bc_num_clean(&z1);
-
-		op = (BC_NUM_NEG_NP(m1) != BC_NUM_NEG_NP(m2)) ?
-		         bc_num_subArrays :
-		         bc_num_addArrays;
-		bc_num_shiftAddSub(c, &z1, max2, op);
-	}
-
+        new_clen = bc_vm_growSize((size_t)alen, (size_t)blen);
+        if ((len_t)c->cap < alen + blen)
+        {
+            bc_num_expand(c, new_clen);
+        }
+    }
+    bi_mul2(aa, alen, bb, blen, c->num, &clen);
+    c->len = (size_t)clen;
 err:
-	BC_SIG_MAYLOCK;
-	free(digs);
-	bc_num_free(&temp);
-	bc_num_free(&z2);
-	bc_num_free(&z1);
-	bc_num_free(&z0);
-	BC_LONGJMP_CONT(vm);
+    BC_SIG_MAYLOCK;
+    BC_LONGJMP_CONT(vm);
 }
 
 /**
